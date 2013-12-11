@@ -2,6 +2,7 @@
 Encapsulation of an open decrypted file
 """
 import os
+import threading
 
 from file_content import EncryptedContent, UnencryptedContent, CryptboxContent
 from . import exceptions
@@ -21,8 +22,12 @@ class OpenDecryptedFile(object):
         self.fd = kwargs['fd']
         self.password = kwargs['password']
 
+        self.rwlock = threading.Lock()
+
         self.readable = kwargs['readable']
         self.writable = kwargs['writable']
+
+        self.file_manager = kwargs['file_manager']
 
         self.dirty = False
         self.open = True
@@ -43,12 +48,13 @@ class OpenDecryptedFile(object):
         could do some weird things if someone has another handle to the
         tempfile. is that even possible? nah.
         """
-        ciphertext = self._load_ciphertext(path=self.source_path)
-        plaintext = ciphertext.decrypt(self.password)
-        self._dump_file(plaintext, fd=self.fd)
+        with self.file_manager.enc_dec_lock:
+            ciphertext = self._load_ciphertext(path=self.source_path)
+            plaintext = ciphertext.decrypt(self.password)
+            self._dump_file(plaintext, fd=self.fd)
 
-        # make sure fd is seeked to start
-        os.lseek(self.fd, 0, os.SEEK_SET)
+            # make sure fd is seeked to start
+            os.lseek(self.fd, 0, os.SEEK_SET)
 
     def encrypt(self):
         """
@@ -57,9 +63,10 @@ class OpenDecryptedFile(object):
 
         NOT THREAD SAFE SOMEONE ELSE COULD BE WRITING TO SOURCE PATH
         """
-        plaintext = self._load_plaintext(fd=self.fd)
-        ciphertext = plaintext.encrypt(self.password)
-        self._dump_file(ciphertext, path=self.source_path)
+        with self.file_manager.enc_dec_lock:
+            plaintext = self._load_plaintext(fd=self.fd)
+            ciphertext = plaintext.encrypt(self.password)
+            self._dump_file(ciphertext, path=self.source_path)
 
     def read(self, size, offset):
         """
@@ -68,10 +75,11 @@ class OpenDecryptedFile(object):
         if not self.readable:
             raise exceptions.CannotRead('from fd %d' % self.fd)
 
-        # TODO errors? they bubble right now
-        fd = self.fd
-        os.lseek(fd, offset, os.SEEK_SET)
-        return os.read(fd, size)
+        with self.rwlock:
+            # TODO errors? they bubble right now
+            fd = self.fd
+            os.lseek(fd, offset, os.SEEK_SET)
+            return os.read(fd, size)
 
     def write(self, data, offset):
         """
@@ -80,12 +88,13 @@ class OpenDecryptedFile(object):
         if not self.writable:
             raise exceptions.CannotWrite('to fd %d' % self.fd)
 
-        # TODO errors? let em bubble
-        if len(data) > 0:
-            self.dirty = True
-            fd = self.fd
-            os.lseek(fd, offset, os.SEEK_SET)
-            return os.write(fd, data)
+        with self.rwlock:
+            # TODO errors? let em bubble
+            if len(data) > 0:
+                self.dirty = True
+                fd = self.fd
+                os.lseek(fd, offset, os.SEEK_SET)
+                return os.write(fd, data)
 
     def flush(self):
         """
@@ -93,10 +102,11 @@ class OpenDecryptedFile(object):
 
         ASSUMING SOMEONE ELSE IN SYNCHRONIZING ACCESS...
         """
-        if self.dirty:
-            self.encrypt()
-            self.dirty = False
-        return 0
+        with self.rwlock:
+            if self.dirty:
+                self.encrypt()
+                self.dirty = False
+            return 0
 
     def truncate(self, length):
         """
@@ -105,9 +115,10 @@ class OpenDecryptedFile(object):
         if not self.writable:
             raise exceptions.CannotWrite('to fd %d' % self.fd)
 
-        # TODO errors? let em bubble
-        self.dirty = True
-        os.ftruncate(self.fd, length)
+        with self.rwlock:
+            # TODO errors? let em bubble
+            self.dirty = True
+            os.ftruncate(self.fd, length)
 
     def _load_ciphertext(self, **kwargs):
         kwargs['kind'] = 'cipher'

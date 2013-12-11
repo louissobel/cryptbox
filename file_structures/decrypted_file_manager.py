@@ -17,6 +17,10 @@ class DecryptedFileManager(object):
         self.open_files_by_inode = {}
         self.registry_lock = threading.Lock()
 
+        # mutex over encryption / decryption actions
+        # TODO make fine grained to a per-path lock?
+        self.enc_dec_lock = threading.Lock()
+
         self.get_password = get_password
 
     def _inode_for_fd(self, fd):
@@ -72,6 +76,7 @@ class DecryptedFileManager(object):
             password=password,
             readable=readable,
             writable=writable,
+            file_manager=self,
         )
         self._register(open_file)
 
