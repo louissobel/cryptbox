@@ -15,11 +15,16 @@ class DecryptedFileManager(object):
 
     def __init__(self, get_password):
         self.open_files_by_inode = {}
-        self.registry_lock = threading.Lock()
+
+        # inner mutex for dictionaries
+        self._registry_lock = threading.Lock()
 
         # mutex over encryption / decryption actions
         # TODO make fine grained to a per-path lock?
         self.enc_dec_lock = threading.Lock()
+
+        # mutex over open / close
+        self.open_close_lock = threading.Lock()
 
         self.get_password = get_password
 
@@ -32,7 +37,7 @@ class DecryptedFileManager(object):
     def _register(self, open_file):
         inode = self._inode_for_fd(open_file.fd)
 
-        with self.registry_lock:
+        with self._registry_lock:
             if inode in self.open_files_by_inode:
                 raise ValueError("Duplicate Inode!")
 
@@ -41,7 +46,7 @@ class DecryptedFileManager(object):
     def _deregister(self, open_file):
         inode = self._inode_for_fd(open_file.fd)
 
-        with self.registry_lock:
+        with self._registry_lock:
             if not inode in self.open_files_by_inode:
                 raise ValueError('No such file!')
 
@@ -71,23 +76,25 @@ class DecryptedFileManager(object):
         if mimetype[0] is not None:
             temp_extension = mimetypes.guess_extension(mimetype[0])
         temp_fd, temp_path = tempfile.mkstemp(temp_extension)
-        open_file = OpenDecryptedFile(temp_path, path,
-            fd=temp_fd,
-            password=password,
-            readable=readable,
-            writable=writable,
-            file_manager=self,
-        )
-        self._register(open_file)
 
-        if kwargs.get('create', False):
-            # we need to create the encrypted empty version
-            open_file.encrypt()
-        else:
-            # load decrypted version
-            open_file.decrypt()
+        with self.open_close_lock:
+            open_file = OpenDecryptedFile(temp_path, path,
+                fd=temp_fd,
+                password=password,
+                readable=readable,
+                writable=writable,
+                file_manager=self,
+            )
+            self._register(open_file)
 
-        return open_file
+            if kwargs.get('create', False):
+                # we need to create the encrypted empty version
+                open_file.encrypt()
+            else:
+                # load decrypted version
+                open_file.decrypt()
+
+            return open_file
 
     def close(self, open_file):
         """
@@ -97,8 +104,9 @@ class DecryptedFileManager(object):
         if not open_file.open:
             raise ValueError('File is already closed!')
 
-        # take it out of circulation first
-        self._deregister(open_file)
-        open_file.open = False
+        with self.open_close_lock:
+            # take it out of circulation first
+            self._deregister(open_file)
+            open_file.open = False
 
-        open_file.flush()
+            open_file.flush()
